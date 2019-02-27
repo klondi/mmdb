@@ -11,15 +11,15 @@ int main (int argc, const char * const * const argv) {
     return 1;
   }
   mmdb_t *db = mmdb_open(argv[1]);
-  
+
   if (db == NULL) {
     printf("Failed to open DB\n");
     return 1;
   }
-  
+
   struct in6_addr bip6;
   struct in_addr bip4;
-  
+
   for (int i = 2; i < argc; i++) {
     mmdb_type_t *lr;
     if(inet_pton(AF_INET, argv[i], &bip4))

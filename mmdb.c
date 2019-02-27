@@ -18,6 +18,9 @@
 //Windows is a bit special here
 typedef __int64 poff64_t;
 #define fseeko(a,b,c) _fseeki64((a),(b),(c))
+#define ftello(a) _ftelli64((a))
+//TODO implement pread
+//TODO move to int/fhandle based APIs
 #else
 typedef off_t poff64_t;
 #endif
@@ -33,48 +36,41 @@ struct mmdb_t {
   uint16_t ip_version;
 };
 
+union mmdb_length_ptr {
+  mmdb_length_t length;
+  mmdb_ptr_t ptr;
+};
+
 //This is a purposefully slow implementation for memory constrained environments
 
 
 static inline poff64_t mmdb_metadata_pos(const mmdb_t * const db) {
   // The maximum allowable size for the metadata section, including the marker that starts the metadata, is 128KiB.
-  const poff64_t mmdb_metadata_pos_max = -128 * 1024;
-  
-  fseeko( db->fd, mmdb_metadata_pos_max, SEEK_END );
-  
+  fseeko( db->fd, -128 * 1024, SEEK_END );
+
   static const unsigned char * const match = (const unsigned char * const) "\xab\xcd\xefMaxMind.com";
   const unsigned char * cur_match = match;
-  poff64_t mdata_pos = 0;
-  bool matched = false;
-
-  int c;
-  
-  while ((c = fgetc(db->fd)) != EOF) {
-    mdata_pos++;
+  poff64_t mdata_pos = -1;
+  for (int c; (c = fgetc(db->fd)) != EOF;) {
     //This only works because \xab only happpens at the beggining of the matched string
     if ( c != *cur_match) {
       //Restart matching again
       cur_match = match;
-    } 
+    }
     //We may or may not have restarted matching here so don't else this
     if( c == *cur_match ) {
       //Check the next character
       cur_match ++;
       // Finished matching
       // We can put this here because we know we will never get an empty string as match
-      if (*cur_match == '\0') {
-        matched = true;
-        mdata_pos = 0;
+      if (!*cur_match) {
+        mdata_pos = ftello(db->fd);
         //Restart search
         cur_match = match;
       }
     }
   }
-  
-  if (!matched)
-    return -1;
-  else
-    return mdata_pos;
+  return mdata_pos;
 }
 
 static void _mmdb_type_free(mmdb_type_t * const data) {
@@ -104,6 +100,100 @@ static void _mmdb_type_free(mmdb_type_t * const data) {
       break;
   }
 }
+
+//Returns the type of data and the length in the database
+//For pointers it returns the position of the pointee instead of the length
+static inline int _mmdb_get_type_length(const mmdb_t * const db, enum mmdb_type_enum * const type, union mmdb_length_ptr * const length) {
+
+  poff64_t cur = ftello(db->fd);
+
+  //Since pointers aren't extended types the maximum amount to read is 5 bytes
+  const size_t max_data_length = 5;
+  uint8_t data[max_data_length];
+  // nb counts the number of bytes still unused in the buffer
+  size_t nb = fread(data,sizeof(uint8_t),max_data_length,db->fd);
+  size_t onb = nb;
+  if (nb == 0)
+    return 1;
+  nb--;
+  enum mmdb_type_enum rtype = (data[0] >> 5) & 0x7;
+
+  //Pointers are special
+  if (rtype == MMDB_POINTER) {
+    int psz = ((data[0] >> 3) & 0x3)+1;
+    if (nb < psz)
+      return 1;
+    nb -= psz;
+    uint8_t *s = data +1;
+    mmdb_ptr_t rptr = data[0] & 0x7;
+    switch (psz) {
+      case 4:
+        rptr = 0;
+        for (int i = 0; i < 4; i++) {
+          rptr = (rptr << 8) | s[i];
+        }
+        break;
+      case 3:
+        // The double rotation will make it 526336
+        rptr = (rptr << 8) + *s++ + 8;
+      case 2:
+        // The rotation will make it 2048
+        rptr = (rptr << 8) + *s++ + 8;
+      case 1:
+        rptr = (rptr << 8) + *s++;
+    }
+    if (length)
+      length->ptr = rptr;
+  } else {
+    uint8_t * s;
+    //Extended type
+    if (rtype == MMDB_EXTENDED) {
+      if (nb  == 0)
+        return 1;
+      nb--;
+      uint16_t nt = data[1]+7;
+      //Unsupported type
+      if (nt >= MMDB_TYPE_MAX)
+        return 1;
+      rtype = nt;
+      s = data + 2;
+    } else {
+      s = data + 1;
+    }
+
+    mmdb_length_t rlength = data[0] & 0x1f;
+    //Multi-length data
+    if (rlength > 28) {
+      int lo = rlength-28;
+      if (nb < lo)
+        return 1;
+      nb -= lo;
+
+      rlength = 0;
+      switch (lo) {
+        case 3:
+          //After the two shifts the one becomes 65536
+          rlength += 1 + *s++;
+          rlength <<= 8;
+        case 2:
+          //After the shift the one becomes 256
+          rlength += 1 + *s++;
+          rlength <<= 8;
+        case 1:
+          rlength += 29 + *s++;
+      }
+    }
+    if (length)
+      length->length = rlength;
+  }
+
+  if (type) *type = rtype;
+
+  //Reset the file pointer to the data after the type header
+  fseeko(db->fd, cur+(onb-nb), SEEK_SET);
+  return 0;
+}
+
 
 #if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
 #define to_local_endian(data, size) {\
@@ -192,23 +282,12 @@ static int mmdb_read(const mmdb_t * const db, mmdb_type_t * const rv, const bool
   if (depth >= db->max_depth)
     return 1;
 
-  int fc = fgetc(db->fd);
-  if (fc == EOF)
+  enum mmdb_type_enum te;
+  union mmdb_length_ptr tlp;
+  if (_mmdb_get_type_length(db, &te, &tlp))
     return 1;
-  enum mmdb_type_enum te = (fc >> 5) & 0x7;
-  //Extended type
-  if (te == MMDB_EXTENDED) {
-    int sc = fgetc(db->fd);
-    if (sc == EOF)
-      return 1;
-    sc += 7;
-    //Unsupported type
-    if (sc >= MMDB_TYPE_MAX)
-      return 1;
-    te = sc;
-  }
-  mmdb_length_t tl = fc & 0x1f;
-  //Pointers are special
+
+  //Automatically dereference pointers
   if (te == MMDB_POINTER) {
     //Metadata shouldn't have pointers
     if (metadata)
@@ -216,41 +295,15 @@ static int mmdb_read(const mmdb_t * const db, mmdb_type_t * const rv, const bool
     //Pointers can't point to other pointers
     if (dereferencing)
       return 1;
-    int psz = (fc >> 3) & 0x3;
-    uint8_t tdata[4];
-    if (fread(tdata, sizeof(uint8_t)*(psz+1), 1, db->fd) != 1)
-      return 1;
-    //If the size is 3,[...] the last three bits of the control byte are ignored.
-    mmdb_ptr_t pv = (psz == 3? 0: fc & 0x7);
-    for (int i = 0; i <= psz; i++) {
-      pv = (pv << 8) | tdata[i];
-    }
-    if (psz == 1)
-      pv += 2048;
-    else if (psz == 2)
-      pv += 526336;
-    fpos_t prev;
-    fgetpos(db->fd,&prev);
-    fseeko( db->fd, db->data + (poff64_t)pv, SEEK_SET );
+    poff64_t prev = ftello(db->fd);
+    fseeko( db->fd, db->data + (poff64_t)tlp.ptr, SEEK_SET );
     //Depth isn't increased when following pointers as only one level of indirection is allowed
     int readval = mmdb_read(db,rv,metadata,true,depth);
-    fsetpos(db->fd,&prev);
+    fseeko(db->fd, prev, SEEK_SET);
     return readval;
-  } else if (tl >= 29) {
-    uint8_t tdata[3];
-    if (fread(tdata, sizeof(uint8_t)*(tl-28), 1, db->fd) != 1)
-      return 1;
-    mmdb_length_t ttl=0;
-    for (int i = 0; i < tl-28; i++) {
-      ttl = (ttl << 8) | tdata[i];
-    }
-    if (tl == 29)
-      tl = ttl + 29;
-    else if (tl == 30)
-      tl = ttl + 285;
-    else if (tl == 31)
-      tl = ttl + 65821;
   }
+
+  mmdb_length_t tl = tlp.length;
   //We have read the type and the length, proceed accordingly
   union mmdb_type_union tu;
   switch (te) {
@@ -291,7 +344,7 @@ static int mmdb_read(const mmdb_t * const db, mmdb_type_t * const rv, const bool
       tu._array.entries = tu._array.length > 0 ? malloc(sizeof(mmdb_type_t)*tu._array.length) : NULL;
       if (tu._array.length > 0 && tu._array.entries == NULL)
         return 1;
-      
+
       for (mmdb_length_t i = 0; i < tu._array.length; i++) {
         if (mmdb_read(db,tu._array.entries+i,metadata,false,depth+1) != 0) {
           for (mmdb_length_t j = 0; j < i; j++)
@@ -311,7 +364,7 @@ static int mmdb_read(const mmdb_t * const db, mmdb_type_t * const rv, const bool
         free(tu._map.keys);
         return 1;
       }
-      
+
       for (mmdb_length_t i = 0; i < tu._map.length; i++) {
         mmdb_type_t tmp;
         //Keys should always be strings and therefore never have more depth than 1
@@ -370,7 +423,7 @@ mmdb_type_t * mmdb_read_metadata(const mmdb_t * const db) {
   mmdb_type_t * rv = malloc(sizeof(mmdb_type_t));
   if (rv == NULL)
     return NULL;
-  fseeko( db->fd, db->metadata, SEEK_END );
+  fseeko( db->fd, db->metadata, SEEK_SET );
   //Metadata can't have pointers because we can't know where the data section is when parsing it
   if (mmdb_read (db, rv, true, false, 0) != 0) {
     free(rv);
@@ -417,8 +470,8 @@ mmdb_t * mmdb_open(const char * const path) {
   rv->fd = fopen(path,"rb");
   if (rv->fd == NULL)
     goto fail_cleanup1;
-  rv->metadata = -mmdb_metadata_pos(rv);
-  if (rv->metadata > 0)
+  rv->metadata = mmdb_metadata_pos(rv);
+  if (rv->metadata < 0)
     goto fail_cleanup2;
   mmdb_type_t *metadata = mmdb_read_metadata(rv);
   if (metadata == NULL)
@@ -438,18 +491,14 @@ mmdb_t * mmdb_open(const char * const path) {
   if (!tmp || tmp->type != MMDB_UINT32)
     goto fail_cleanup3;
   rv->node_count = tmp->data._uint32;
-  rv->data = (poff64_t)(rv->record_size/4) * (poff64_t)(rv->node_count) + (poff64_t) 16;  
+  rv->data = (poff64_t)(rv->record_size/4) * (poff64_t)(rv->node_count) + (poff64_t) 16;
   printf("%ld\n",rv->data);
   tmp = mmdb_map_gets(metadata,"ip_version");
   if (!tmp || tmp->type != MMDB_UINT16)
     goto fail_cleanup3;
   rv->ip_version = tmp->data._uint16;
-  if ( rv->ip_version != 4 && rv->ip_version != 6) 
+  if ( rv->ip_version != 4 && rv->ip_version != 6)
     goto fail_cleanup3;
-  fseeko(rv->fd,rv->data-16,SEEK_SET);
-  for (int i = 0; i < 16; i++)
-    if (fgetc(rv->fd) != 0)
-      printf("Invalid header! %d\n",i);
   mmdb_type_free(metadata);
   return rv;
   fail_cleanup3:
