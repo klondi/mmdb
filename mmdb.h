@@ -1,5 +1,7 @@
-//Copyright ©2019 Francisco Blas Izquierdo Riera (klondike)
+//Copyright ©2019-2020 Francisco Blas Izquierdo Riera (klondike)
 
+#ifndef MMDB_H
+#define MMDB_H
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -81,19 +83,19 @@ typedef struct mmdb_array_t {
 } mmdb_array_t;
 
 union mmdb_type_union {
-  mmdb_ptr_t _ptr;
-  mmdb_double_t _double;
-  mmdb_uint16_t _uint16;
-  mmdb_uint32_t _uint32;
-  mmdb_int32_t _int32;
-  mmdb_uint64_t _uint64;
-  mmdb_uint128_t _uint128;
-  mmdb_bool_t _bool;
-  mmdb_float_t _float;
-  mmdb_string_t _string;
-  mmdb_bytes_t _bytes;
-  mmdb_map_t _map;
-  mmdb_array_t _array;
+  mmdb_ptr_t u_ptr;
+  mmdb_double_t u_double;
+  mmdb_uint16_t u_uint16;
+  mmdb_uint32_t u_uint32;
+  mmdb_int32_t u_int32;
+  mmdb_uint64_t u_uint64;
+  mmdb_uint128_t u_uint128;
+  mmdb_bool_t u_bool;
+  mmdb_float_t u_float;
+  mmdb_string_t u_string;
+  mmdb_bytes_t u_bytes;
+  mmdb_map_t u_map;
+  mmdb_array_t u_array;
 };
 
 struct mmdb_type_t {
@@ -117,4 +119,5 @@ void mmdb_close(mmdb_t * db);
 
 #ifdef __cplusplus
 }
+#endif
 #endif

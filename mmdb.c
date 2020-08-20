@@ -1,59 +1,29 @@
-//Copyright ©2019 Francisco Blas Izquierdo Riera (klondike)
-
-//Needed to allow 64-bit seeks
-#ifndef _WIN32
-#define _FILE_OFFSET_BITS 64
-#define _POSIX_C_SOURCE 200112L
-#endif
+//Copyright ©2019-2020 Francisco Blas Izquierdo Riera (klondike)
 
 #include "mmdb.h"
+#include "mmdb_internal.h"
 
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
 #include <ctype.h>
 
-#ifdef _WIN32
-//Windows is a bit special here
-typedef __int64 poff64_t;
-#define fseeko(a,b,c) _fseeki64((a),(b),(c))
-#define ftello(a) _ftelli64((a))
-//TODO implement pread
-//TODO move to int/fhandle based APIs
-#else
-typedef off_t poff64_t;
-#endif
-
-//TODO: mutex handling
-struct mmdb_t {
-  poff64_t data;
-  poff64_t metadata;
-  FILE * fd;
-  uint32_t max_depth;
-  uint32_t node_count;
-  uint16_t record_size;
-  uint16_t ip_version;
-};
-
-union mmdb_length_ptr {
-  mmdb_length_t length;
-  mmdb_ptr_t ptr;
-};
-
 //This is a purposefully slow implementation for memory constrained environments
 
-
+/* This is the most memory efficient way to get the metadata when using an fd based approach. There are faster ways when using a memory mapped database */
 static inline poff64_t mmdb_metadata_pos(const mmdb_t * const db) {
   // The maximum allowable size for the metadata section, including the marker that starts the metadata, is 128KiB.
-  fseeko( db->fd, -128 * 1024, SEEK_END );
-
-  static const unsigned char * const match = (const unsigned char * const) "\xab\xcd\xefMaxMind.com";
-  const unsigned char * cur_match = match;
+  poff64_t pos = _mm_getfsz(db->fd);
+  if (pos < 0)
+    return -1;
+  // Rewind up to 128KiB backwards
+  pos = pos < 128 * 1024 ? 0 : pos - (128 * 1024);
+  const char * const match = "\xab\xcd\xefMaxMind.com";
+  const char * cur_match = match;
   poff64_t mdata_pos = -1;
-  for (int c; (c = fgetc(db->fd)) != EOF;) {
+  for (char c; freadc(db->fd,&c,&pos) ;) {
     //This only works because \xab only happpens at the beggining of the matched string
-    if ( c != *cur_match) {
+    if (c != *cur_match) {
       //Restart matching again
       cur_match = match;
     }
@@ -64,7 +34,7 @@ static inline poff64_t mmdb_metadata_pos(const mmdb_t * const db) {
       // Finished matching
       // We can put this here because we know we will never get an empty string as match
       if (!*cur_match) {
-        mdata_pos = ftello(db->fd);
+        mdata_pos = pos;
         //Restart search
         cur_match = match;
       }
@@ -78,23 +48,23 @@ static void _mmdb_type_free(mmdb_type_t * const data) {
     return;
   switch (data->type) {
     case MMDB_STRING:
-      free(data->data._string.data);
+      free(data->data.u_string.data);
       break;
     case MMDB_BYTES:
-      free(data->data._bytes.data);
+      free(data->data.u_bytes.data);
       break;
     case MMDB_ARRAY:
-      for (int i = 0; i < data->data._array.length; i++)
-        _mmdb_type_free(data->data._array.entries+i);
-      free(data->data._array.entries);
+      for (int i = 0; i < data->data.u_array.length; i++)
+        _mmdb_type_free(data->data.u_array.entries+i);
+      free(data->data.u_array.entries);
       break;
     case MMDB_MAP:
-      for (int i = 0; i < data->data._map.length; i++) {
-        free(data->data._map.keys[i].data);
-        _mmdb_type_free(data->data._map.values+i);
+      for (int i = 0; i < data->data.u_map.length; i++) {
+        free(data->data.u_map.keys[i].data);
+        _mmdb_type_free(data->data.u_map.values+i);
       }
-      free(data->data._map.keys);
-      free(data->data._map.values);
+      free(data->data.u_map.keys);
+      free(data->data.u_map.values);
       break;
     default:
       break;
@@ -103,17 +73,16 @@ static void _mmdb_type_free(mmdb_type_t * const data) {
 
 //Returns the type of data and the length in the database
 //For pointers it returns the position of the pointee instead of the length
-static inline int _mmdb_get_type_length(const mmdb_t * const db, enum mmdb_type_enum * const type, union mmdb_length_ptr * const length) {
-
-  poff64_t cur = ftello(db->fd);
+static inline int _mmdb_get_type_length(const mmdb_t * const db, enum mmdb_type_enum * const type, union mmdb_length_ptr * const length, poff64_t *pos) {
 
   //Since pointers aren't extended types the maximum amount to read is 5 bytes
-  const size_t max_data_length = 5;
+#define max_data_length 5
   uint8_t data[max_data_length];
   // nb counts the number of bytes still unused in the buffer
-  size_t nb = fread(data,sizeof(uint8_t),max_data_length,db->fd);
+  poff64_t opos = *pos;
+  size_t nb = _mm_pread(db->fd,data,max_data_length,pos);
   size_t onb = nb;
-  if (nb == 0)
+  if (nb <= 0)
     return 1;
   nb--;
   enum mmdb_type_enum rtype = (data[0] >> 5) & 0x7;
@@ -190,8 +159,9 @@ static inline int _mmdb_get_type_length(const mmdb_t * const db, enum mmdb_type_
   if (type) *type = rtype;
 
   //Reset the file pointer to the data after the type header
-  fseeko(db->fd, cur+(onb-nb), SEEK_SET);
+  *pos = opos + (onb-nb);
   return 0;
+#undef max_data_length
 }
 
 
@@ -207,67 +177,67 @@ static inline int _mmdb_get_type_length(const mmdb_t * const db, enum mmdb_type_
 #define to_local_endian(data)
 #endif
 
-#define read_string(fp,v,blength) {\
+#define read_string(fp,v,blength,off) {\
   (v).length = (blength);\
   (v).data = malloc(sizeof(char)*(v).length+1);\
   if (v.data == NULL)\
     return 1;\
   (v).data[(v).length] = '\0';\
-  if (fread((v).data, sizeof(char)*((v).length), 1, (fp)) != 1) {\
+  if (!fread_full(fp, (v).data, sizeof(char)*((v).length), (off))) {\
     free((v).data);\
     return 1;\
   }\
 }
 
-#define read_bytes(fp,v,blength) {\
+#define read_bytes(fp,v,blength,off) {\
   (v).length = (blength);\
   (v).data = malloc(sizeof(uint8_t)*(v).length);\
   if (v.data == NULL)\
     return 1;\
-  if (fread((v).data, sizeof(uint8_t)*((v).length), 1, (fp)) != 1) {\
+  if (!fread_full(fp, (v).data, sizeof(uint8_t)*((v).length), (off))) {\
     free((v).data);\
     return 1;\
   }\
 }
 
-#define read_floating(fp,v,cvt,length,elength) {\
+#define read_floating(fp,v,cvt,length,elength,off) {\
   if ((length) != (elength))\
     return 1;\
   uint8_t vdata[(elength)];\
-  if (fread(vdata, sizeof(uint8_t)*(elength), 1, (fp)) != 1)\
+  if (!fread_full(fp, vdata, sizeof(uint8_t)*(elength), (off))) \
     return 1;\
   to_local_endian(vdata,(elength));\
   (v) = *(cvt*)vdata;\
 }
 
-#define read_suint(fp,v,cvt,length,elength) {\
+#define read_suint(fp,v,cvt,length,elength,off) {\
   if ((length) > (elength))\
     return 1;\
   uint8_t vdata[(elength)];\
   for (int i = 0; i < (elength) - (length); i++)\
     vdata[i] = 0;\
-  if ((length) != 0 && fread(vdata+((elength) - (length)), sizeof(uint8_t)*(length), 1, (fp)) != 1)\
+  if ((length) != 0 && !fread_full(fp, vdata+((elength) - (length)), sizeof(uint8_t)*(length), (off)))\
     return 1;\
   to_local_endian(vdata,(elength));\
   (v) = *(cvt*)vdata;\
 }
 
-#define read_buint(fp,v,length,elength) {\
+#define read_buint(fp,v,length,elength,off) {\
   if ((length) > (elength))\
     return 1;\
   for (int i = 0; i < (elength) - (length); i++)\
     (v).data[i] = 0;\
-  if ((length) != 0 && fread((v).data+((elength) - (length)), sizeof(uint8_t)*(length), 1, (fp)) != 1)\
+  if ((length) != 0 && !fread_full(fp, (v).data+((elength) - (length)), sizeof(uint8_t)*(length), (off)))\
     return 1;\
   to_local_endian((v).data,(elength));\
 }
 
 
-#define read_ssint(fp,v,cvt,length,elength) {\
+#define read_ssint(fp,v,cvt,length,elength,off) {\
   if ((length) > (elength))\
     return 1;\
   uint8_t vdata[(elength)];\
-  if ((length) != 0 && fread(vdata+((elength) - (length)), sizeof(uint8_t)*(length), 1, (fp)) != 1)\
+  if ((length) != 0 && !fread_full(fp, vdata+((elength) - (length)), sizeof(uint8_t)*(length), (off)))\
     return 1;\
   for (int i = 0; i < (elength) - (length); i++)\
     vdata[i] = vdata[(elength) - (length)] & 0x80? 0xff : 0;\
@@ -276,7 +246,7 @@ static inline int _mmdb_get_type_length(const mmdb_t * const db, enum mmdb_type_
 }
 
 //Returns 1 on error and the read data on rv
-static int mmdb_read(const mmdb_t * const db, mmdb_type_t * const rv, const bool metadata, const bool dereferencing, const uint32_t depth) {
+static int mmdb_read(const mmdb_t * const db, mmdb_type_t * const rv, const bool metadata, const bool dereferencing, const uint32_t depth, poff64_t *pos) {
 
   //Fail if we exceed the allowable structure nesting depth
   if (depth >= db->max_depth)
@@ -284,7 +254,7 @@ static int mmdb_read(const mmdb_t * const db, mmdb_type_t * const rv, const bool
 
   enum mmdb_type_enum te;
   union mmdb_length_ptr tlp;
-  if (_mmdb_get_type_length(db, &te, &tlp))
+  if (_mmdb_get_type_length(db, &te, &tlp, pos))
     return 1;
 
   //Automatically dereference pointers
@@ -295,12 +265,9 @@ static int mmdb_read(const mmdb_t * const db, mmdb_type_t * const rv, const bool
     //Pointers can't point to other pointers
     if (dereferencing)
       return 1;
-    poff64_t prev = ftello(db->fd);
-    fseeko( db->fd, db->data + (poff64_t)tlp.ptr, SEEK_SET );
+    poff64_t npos = db->data + (poff64_t)tlp.ptr;
     //Depth isn't increased when following pointers as only one level of indirection is allowed
-    int readval = mmdb_read(db,rv,metadata,true,depth);
-    fseeko(db->fd, prev, SEEK_SET);
-    return readval;
+    return mmdb_read(db,rv,metadata,true,depth,&npos);
   }
 
   mmdb_length_t tl = tlp.length;
@@ -310,84 +277,84 @@ static int mmdb_read(const mmdb_t * const db, mmdb_type_t * const rv, const bool
     case MMDB_BOOL:
       if ( tl > 1)
         return 1;
-      tu._bool = (tl == 1);
+      tu.u_bool = (tl == 1);
       break;
     case MMDB_STRING:
-      read_string(db->fd,tu._string,tl);
+      read_string(db->fd,tu.u_string,tl,pos);
       break;
     case MMDB_BYTES:
-      read_bytes(db->fd,tu._bytes,tl);
+      read_bytes(db->fd,tu.u_bytes,tl,pos);
       break;
     case MMDB_DOUBLE:
-      read_floating(db->fd,tu._double,mmdb_double_t,tl,8);
+      read_floating(db->fd,tu.u_double,mmdb_double_t,tl,8,pos);
       break;
     case MMDB_FLOAT:
-      read_floating(db->fd,tu._float,mmdb_float_t,tl,4);
+      read_floating(db->fd,tu.u_float,mmdb_float_t,tl,4,pos);
       break;
     case MMDB_UINT16:
-      read_suint(db->fd,tu._uint16,mmdb_uint16_t,tl,2);
+      read_suint(db->fd,tu.u_uint16,mmdb_uint16_t,tl,2,pos);
       break;
     case MMDB_UINT32:
-      read_suint(db->fd,tu._uint32,mmdb_uint32_t,tl,4);
+      read_suint(db->fd,tu.u_uint32,mmdb_uint32_t,tl,4,pos);
       break;
     case MMDB_UINT64:
-      read_buint(db->fd,tu._uint64,tl,8);
+      read_buint(db->fd,tu.u_uint64,tl,8,pos);
       break;
     case MMDB_UINT128:
-      read_buint(db->fd,tu._uint128,tl,16);
+      read_buint(db->fd,tu.u_uint128,tl,16,pos);
       break;
     case MMDB_INT32:
-      read_ssint(db->fd,tu._uint32,mmdb_uint32_t,tl,4);
+      read_ssint(db->fd,tu.u_int32,mmdb_uint32_t,tl,4,pos);
       break;
     case MMDB_ARRAY:
-      tu._array.length = tl;
-      tu._array.entries = tu._array.length > 0 ? malloc(sizeof(mmdb_type_t)*tu._array.length) : NULL;
-      if (tu._array.length > 0 && tu._array.entries == NULL)
+      tu.u_array.length = tl;
+      tu.u_array.entries = tu.u_array.length > 0 ? malloc(sizeof(mmdb_type_t)*tu.u_array.length) : NULL;
+      if (tu.u_array.length > 0 && tu.u_array.entries == NULL)
         return 1;
 
-      for (mmdb_length_t i = 0; i < tu._array.length; i++) {
-        if (mmdb_read(db,tu._array.entries+i,metadata,false,depth+1) != 0) {
+      for (mmdb_length_t i = 0; i < tu.u_array.length; i++) {
+        if (mmdb_read(db,tu.u_array.entries+i,metadata,false,depth+1,pos) != 0) {
           for (mmdb_length_t j = 0; j < i; j++)
-            _mmdb_type_free(tu._array.entries+j);
-          free(tu._array.entries);
+            _mmdb_type_free(tu.u_array.entries+j);
+          free(tu.u_array.entries);
           return 1;
         }
       }
       break;
     case MMDB_MAP:
-      tu._map.length = tl;
-      tu._map.keys = tu._map.length > 0 ? malloc(sizeof(mmdb_string_t)*tu._map.length) : NULL;
-      if (tu._map.length > 0 && tu._map.keys == NULL)
+      tu.u_map.length = tl;
+      tu.u_map.keys = tu.u_map.length > 0 ? malloc(sizeof(mmdb_string_t)*tu.u_map.length) : NULL;
+      if (tu.u_map.length > 0 && tu.u_map.keys == NULL)
         return 1;
-      tu._map.values = tu._map.length > 0 ? malloc(sizeof(mmdb_type_t)*tu._map.length) : NULL;
-      if (tu._map.length > 0 && tu._map.values == NULL) {
-        free(tu._map.keys);
+      tu.u_map.values = tu.u_map.length > 0 ? malloc(sizeof(mmdb_type_t)*tu.u_map.length) : NULL;
+      if (tu.u_map.length > 0 && tu.u_map.values == NULL) {
+        free(tu.u_map.keys);
         return 1;
       }
 
-      for (mmdb_length_t i = 0; i < tu._map.length; i++) {
+      for (mmdb_length_t i = 0; i < tu.u_map.length; i++) {
         mmdb_type_t tmp;
         //Keys should always be strings and therefore never have more depth than 1
-        if (mmdb_read(db,&tmp,metadata,false,db->max_depth-1) != 0)
+        if (mmdb_read(db,&tmp,metadata,false,db->max_depth-1,pos) != 0)
           goto map_cleanup;
         //TYPE must always be string for keys
         if (tmp.type != MMDB_STRING) {
           _mmdb_type_free(&tmp);
           goto map_cleanup;
         }
-        tu._map.keys[i] = tmp.data._string;
-        if (mmdb_read(db,tu._map.values+i,metadata,false,depth+1) != 0) {
-          free(tu._map.keys[i].data);
+        tu.u_map.keys[i] = tmp.data.u_string;
+        if (mmdb_read(db,tu.u_map.values+i,metadata,false,depth+1,pos) != 0) {
+          free(tu.u_map.keys[i].data);
           goto map_cleanup;
         }
         if (false) {
 map_cleanup:
           for (mmdb_length_t j = 0; j < i; j++) {
-            free(tu._map.keys[j].data);
-            _mmdb_type_free(tu._map.values+j);
+            free(tu.u_map.keys[j].data);
+            _mmdb_type_free(tu.u_map.values+j);
           }
-          free(tu._map.keys);
-          free(tu._map.values);
+          free(tu.u_map.keys);
+          free(tu.u_map.values);
           return 1;
         }
       }
@@ -423,9 +390,9 @@ mmdb_type_t * mmdb_read_metadata(const mmdb_t * const db) {
   mmdb_type_t * rv = malloc(sizeof(mmdb_type_t));
   if (rv == NULL)
     return NULL;
-  fseeko( db->fd, db->metadata, SEEK_SET );
+  poff64_t pos = db->metadata;
   //Metadata can't have pointers because we can't know where the data section is when parsing it
-  if (mmdb_read (db, rv, true, false, 0) != 0) {
+  if (mmdb_read (db, rv, true, false, 0, &pos) != 0) {
     free(rv);
     return NULL;
   }
@@ -439,19 +406,19 @@ mmdb_type_t * mmdb_read_metadata(const mmdb_t * const db) {
 mmdb_type_t * mmdb_array_get(const mmdb_type_t * const array, mmdb_length_t pos) {
   if (array->type != MMDB_ARRAY)
     return NULL;
-  if (pos >= array->data._array.length)
+  if (pos >= array->data.u_array.length)
     return NULL;
-  return array->data._array.entries + pos;
+  return array->data.u_array.entries + pos;
 }
 
 mmdb_type_t * mmdb_map_get(const mmdb_type_t * const map, const char * const key, size_t len) {
   if (map->type != MMDB_MAP)
     return NULL;
-  for (mmdb_length_t i = 0; i < map->data._map.length; i++) {
-    if (map->data._map.keys[i].length != len)
+  for (mmdb_length_t i = 0; i < map->data.u_map.length; i++) {
+    if (map->data.u_map.keys[i].length != len)
       continue;
-    if(!memcmp(map->data._map.keys[i].data, key, len))
-      return map->data._map.values+i;
+    if(!memcmp(map->data.u_map.keys[i].data, key, len))
+      return map->data.u_map.values+i;
   }
   return NULL;
 }
@@ -467,8 +434,8 @@ mmdb_t * mmdb_open(const char * const path) {
   if (rv == NULL)
     return NULL;
   rv->max_depth = MMDB_MAX_DEPTH;
-  rv->fd = fopen(path,"rb");
-  if (rv->fd == NULL)
+  rv->fd = _mm_open(path);
+  if (_mm_open_err(rv->fd))
     goto fail_cleanup1;
   rv->metadata = mmdb_metadata_pos(rv);
   if (rv->metadata < 0)
@@ -478,25 +445,24 @@ mmdb_t * mmdb_open(const char * const path) {
     goto fail_cleanup2;
   mmdb_type_t *tmp;
   tmp = mmdb_map_gets(metadata,"binary_format_major_version");
-  if (!tmp || tmp->type != MMDB_UINT16 || tmp->data._uint16 != 2)
+  if (!tmp || tmp->type != MMDB_UINT16 || tmp->data.u_uint16 != 2)
     goto fail_cleanup3;
   tmp = mmdb_map_gets(metadata,"binary_format_minor_version");
-  if (!tmp || tmp->type != MMDB_UINT16 || tmp->data._uint16 != 0)
+  if (!tmp || tmp->type != MMDB_UINT16 || tmp->data.u_uint16 != 0)
     fprintf(stderr,"Unsupported minor version\n");
   tmp = mmdb_map_gets(metadata,"record_size");
-  if (!tmp || tmp->type != MMDB_UINT16 || tmp->data._uint16 > 32 || tmp->data._uint16 & 0x3 )
+  if (!tmp || tmp->type != MMDB_UINT16 || tmp->data.u_uint16 > 32 || tmp->data.u_uint16 & 0x3 )
     goto fail_cleanup3;
-  rv->record_size = tmp->data._uint16;
+  rv->record_size = tmp->data.u_uint16;
   tmp = mmdb_map_gets(metadata,"node_count");
   if (!tmp || tmp->type != MMDB_UINT32)
     goto fail_cleanup3;
-  rv->node_count = tmp->data._uint32;
+  rv->node_count = tmp->data.u_uint32;
   rv->data = (poff64_t)(rv->record_size/4) * (poff64_t)(rv->node_count) + (poff64_t) 16;
-  printf("%ld\n",rv->data);
   tmp = mmdb_map_gets(metadata,"ip_version");
   if (!tmp || tmp->type != MMDB_UINT16)
     goto fail_cleanup3;
-  rv->ip_version = tmp->data._uint16;
+  rv->ip_version = tmp->data.u_uint16;
   if ( rv->ip_version != 4 && rv->ip_version != 6)
     goto fail_cleanup3;
   mmdb_type_free(metadata);
@@ -504,7 +470,7 @@ mmdb_t * mmdb_open(const char * const path) {
   fail_cleanup3:
     mmdb_type_free(metadata);
   fail_cleanup2:
-    fclose(rv->fd);
+    _mm_close(rv->fd);
   fail_cleanup1:
     free(rv);
     return NULL;
@@ -516,6 +482,7 @@ void mmdb_set_max_depth(mmdb_t *const db, uint32_t max_depth) {
 
 
 static mmdb_type_t * mmdb_lookup(const mmdb_t * const db, const uint8_t * const data, size_t len) {
+  poff64_t pos = 0;
   uint32_t node = 0;
   if (db->node_count == 0) //Corner case, no nodes: lookup fails
     return NULL;
@@ -523,27 +490,27 @@ static mmdb_type_t * mmdb_lookup(const mmdb_t * const db, const uint8_t * const 
     for (uint8_t j = 0x80; j > 0 ; j>>=1) {
       bool direction = (data[i]&j) != 0;
       poff64_t bpos = (((poff64_t) node)  * ((poff64_t)2) + (direction? (poff64_t)1 :(poff64_t) 0)) * ((poff64_t) db->record_size);
-      fseeko(db->fd, bpos / ((poff64_t) 8), SEEK_SET);
+      pos = bpos / ((poff64_t) 8);
       //Initial partial read
       if (bpos&0x4) {
-        int c = fgetc(db->fd);
-        if (c == EOF)
+        uint8_t c;
+        if (!freadu8(db->fd, &c, &pos))
           return NULL;
         node = c & 0xf;
       } else {
         node = 0;
       }
       for (uint16_t k = bpos&0x7; k + 8 <= db->record_size; k+=8) {
-        int c = fgetc(db->fd);
-        if (c == EOF)
+        uint8_t c;
+        if (!freadu8(db->fd, &c, &pos))
           return NULL;
         node = (node << 8) | c;
       }
       //Possible final read
       if (db->record_size & 0x4 && !(bpos&0x4)) {
         //The MSBs are placed on the top 4 bits
-        int c = fgetc(db->fd);
-        if (c == EOF)
+        uint8_t c;
+        if (!freadu8(db->fd, &c, &pos))
           return NULL;
         node |= ((c&0xf0u) >> 4) << (db->record_size-4);
       }
@@ -555,8 +522,8 @@ static mmdb_type_t * mmdb_lookup(const mmdb_t * const db, const uint8_t * const 
         mmdb_type_t * rv = malloc(sizeof(mmdb_type_t));
         if (rv == NULL)
           return NULL;
-        fseeko(db->fd, db->data + (poff64_t) (node-16-db->node_count), SEEK_SET);
-        if (mmdb_read(db, rv, false, false, 0)) {
+        pos = db->data + (poff64_t) (node-16-db->node_count);
+        if (mmdb_read(db, rv, false, false, 0, &pos)) {
           free(rv);
           return NULL;
         } else
@@ -589,7 +556,7 @@ mmdb_type_t * mmdb_lookup6(const mmdb_t * const db, const uint8_t * const ip) {
 
 
 void mmdb_close(mmdb_t * const db) {
-  fclose(db->fd);
+  _mm_close(db->fd);
   free(db);
 }
 
@@ -609,12 +576,12 @@ void mmdb_print(const mmdb_type_t * const lr) {
       printf("END_MARKER");
       return;
     case MMDB_POINTER:
-      printf("*%"PRIu32, lr->data._ptr);
+      printf("*%"PRIu32, lr->data.u_ptr);
       return;
     case MMDB_STRING:
       putchar('\"');
-      for (mmdb_length_t i = 0; i < lr->data._string.length; i++) {
-        switch (lr->data._string.data[i]) {
+      for (mmdb_length_t i = 0; i < lr->data.u_string.length; i++) {
+        switch (lr->data.u_string.data[i]) {
           case '\"':
             printf("\\\"");
             break;
@@ -638,68 +605,68 @@ void mmdb_print(const mmdb_type_t * const lr) {
             break;
           // and so on
           default:
-            if (iscntrl(lr->data._string.data[i]))
-              printf("\\%03o", lr->data._string.data[i]);
+            if (iscntrl(lr->data.u_string.data[i]))
+              printf("\\%03o", lr->data.u_string.data[i]);
             else
-              putchar(lr->data._string.data[i]);
+              putchar(lr->data.u_string.data[i]);
         }
       }
       putchar('\"');
       return;
     case MMDB_DOUBLE:
-      printf("%f",lr->data._double);
+      printf("%f",lr->data.u_double);
       return;
     case MMDB_FLOAT:
-      printf("%f",lr->data._float);
+      printf("%f",lr->data.u_float);
       return;
     case MMDB_BYTES:
       putchar('b');
       putchar('\"');
-      for (mmdb_length_t i = 0; i < lr->data._bytes.length; i++)
-          printf("\\%03o", lr->data._bytes.data[i]);
+      for (mmdb_length_t i = 0; i < lr->data.u_bytes.length; i++)
+          printf("\\%03o", lr->data.u_bytes.data[i]);
       putchar('\"');
       return;
     case MMDB_UINT16:
-      printf("%"PRIu16,lr->data._uint16);
+      printf("%"PRIu16,lr->data.u_uint16);
       return;
     case MMDB_UINT32:
-      printf("%"PRIu32,lr->data._uint32);
+      printf("%"PRIu32,lr->data.u_uint32);
       return;
     case MMDB_INT32:
-      printf("%"PRId32,lr->data._int32);
+      printf("%"PRId32,lr->data.u_int32);
       return;
     case MMDB_UINT64:
       printf("0x");
       for (int i = 8; i > 0; i--)
-        printf("%02x",lr->data._uint64.data[i]);
+        printf("%02x",lr->data.u_uint64.data[i]);
       return;
     case MMDB_UINT128:
       printf("0x");
       for (int i = 16; i > 0; i--)
-        printf("%02x",lr->data._uint128.data[i]);
+        printf("%02x",lr->data.u_uint128.data[i]);
       return;
     case MMDB_BOOL:
-      printf(lr->data._bool?"true":"false");
+      printf(lr->data.u_bool?"true":"false");
       return;
     case MMDB_ARRAY:
       printf("[ ");
-      for (mmdb_length_t i = 0; i < lr->data._array.length; i++) {
-        mmdb_print(lr->data._array.entries+i);
-        if (i != lr->data._array.length-1)
+      for (mmdb_length_t i = 0; i < lr->data.u_array.length; i++) {
+        mmdb_print(lr->data.u_array.entries+i);
+        if (i != lr->data.u_array.length-1)
           printf(", ");
       }
       printf(" ]");
       return;
     case MMDB_MAP:
       printf("{ ");
-      for (mmdb_length_t i = 0; i < lr->data._map.length; i++) {
+      for (mmdb_length_t i = 0; i < lr->data.u_map.length; i++) {
         mmdb_type_t key;
         key.type = MMDB_STRING;
-        key.data._string = lr->data._map.keys[i];
+        key.data.u_string = lr->data.u_map.keys[i];
         mmdb_print(&key);
         printf(": ");
-        mmdb_print(lr->data._map.values+i);
-        if (i != lr->data._map.length -1)
+        mmdb_print(lr->data.u_map.values+i);
+        if (i != lr->data.u_map.length -1)
           printf(", ");
       }
       printf(" }");
