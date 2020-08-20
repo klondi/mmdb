@@ -674,3 +674,7 @@ void mmdb_print(const mmdb_type_t * const lr) {
       return;
   }
 }
+
+int mmdb_threadsafe(void) {
+  return MMDB_THREADSAFE;
+}

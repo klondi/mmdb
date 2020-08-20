@@ -115,6 +115,7 @@ mmdb_type_t * mmdb_map_gets(const mmdb_type_t * map, const char * key);
 void mmdb_print(const mmdb_type_t * lr);
 void mmdb_type_free(mmdb_type_t * data);
 void mmdb_close(mmdb_t * db);
+int mmdb_threadsafe(void);
 
 
 #ifdef __cplusplus

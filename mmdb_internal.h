@@ -2,6 +2,7 @@
 
 #ifndef MMDB_INTERNAL_H
 #define MMDB_INTERNAL_H
+#define MMDB_THREADSAFE 1
 //Needed to allow 64-bit seeks
 #ifndef _WIN32
 #define _FILE_OFFSET_BITS 64
@@ -175,6 +176,9 @@ inline static poff64_t _mm_getfsz(pfilehdl_t fd) {
 #else
 //These aren't thread safe!
 #warning "Using non thread safe file accessors"
+#undef MMDB_THREADSAFE
+#define MMDB_THREADSAFE 0
+
 typedef off_t poff64_t;
 typedef FILE * pfilehdl_t;
 

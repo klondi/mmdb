@@ -25,6 +25,14 @@ https://maxmind.github.io/MaxMind-DB/ and using MaxMind's GeoLite databases to t
 implementation. This approach was chosen to ensure the GPL licensed code is clean from
 Apache2.0 code.
 
+## Compilation
+You can use the library by adding mmdb.c to your sources and including mmdb.h into your
+own code.
+
+If you want to use the (faster) mmap based API at the expense of the database always taking
+some of the memory space until closed you can do so by defining MMDB_USE_MMAP when compiling
+mmdb.c (the backend is hidden from the rest of the code).
+
 ## Usage
 MMDB provides a simple API. It currently has no dependencies and can be easily integrated
 into your own GPL project.
@@ -46,65 +54,65 @@ may be inconsistent or a bug may exist in this software.
 #### Booleans
 `mmdb_bool_t`  
 `MMDB_BOOL`  
-`_bool`  
+`u_bool`  
 
 Booleans can be either true or false.
 Their type is `mmdb_bool_t`, their `mmdb_type_enum` value is `MMDB_BOOL`  and their
-`mmdb_type_union` member is called `_bool`.
+`mmdb_type_union` member is called `u_bool`.
 
 #### Doubles preccission floating point numbers (doubles)
 `mmdb_double_t`  
 `MMDB_DOUBLE`  
-`_double`  
+`u_double`  
 
 Doubles represent an IEEE 754 double precission floating point number.
 Their type is `mmdb_double_t`, their `mmdb_type_enum` value is `MMDB_DOUBLE` and their
-`mmdb_type_union` member is called `_double`.
+`mmdb_type_union` member is called `u_double`.
 
 #### Single preccission floating point numbers (floats)
 `mmdb_float_t`  
 `MMDB_FLOAT`  
-`_float`  
+`u_float`  
 
 Floats represent an IEEE 754 single precission floating point number.
 Their type is `mmdb_float_t`, their `mmdb_type_enum` value is `MMDB_FLOAT` and their
-`mmdb_type_union` member is called `_float`.
+`mmdb_type_union` member is called `u_float`.
 
 #### 16-bit unsigned integer (uint16s)
 `mmdb_uint16_t`  
 `MMDB_UINT16`  
-`_uint16`  
+`u_uint16`  
 
 Uint16s represents 16-bit unsigned integers ranging from 0 to 2^16-1.
 Their type is `mmdb_uint16_t`, their `mmdb_type_enum` value is `MMDB_UINT16` and their
-`mmdb_type_union` member is called `_uint16`.
+`mmdb_type_union` member is called `u_uint16`.
 
 #### 32-bit unsigned integer (uint32s)
 `mmdb_uint32_t`  
 `MMDB_UINT32`  
-`_uint32`  
+`u_uint32`  
 
 Uint32s represent 32-bit unsigned integers ranging from 0 to 2^32-1.
 Their type is `mmdb_uint32_t`, their `mmdb_type_enum` value is `MMDB_UINT32` and their
-`mmdb_type_union` member is called `_uint32`.
+`mmdb_type_union` member is called `u_uint32`.
 
 #### 32-bit signed integer (int32s)
 `mmdb_int32_t`  
 `MMDB_INT32`  
-`_int32`  
+`u_int32`  
 
 Int32s represent 32-bit two's complement signed integers ranging from -2^31 to 2^31-1.
 Their type is `mmdb_int32_t`, their `mmdb_type_enum` value is `MMDB_INT32` and their
-`mmdb_type_union` member is called `_int32`.
+`mmdb_type_union` member is called `u_int32`.
 
 #### 64-bit unsigned integer (uint64s)
 `mmdb_uint64_t`  
 `MMDB_UINT64`  
-`_uint64`  
+`u_uint64`  
 
 Uint64s represent 64-bit unsigned integers ranging from 0 to 2^64-1.
 Their type is `mmdb_uint64_t`, their `mmdb_type_enum` value is `MMDB_UINT64` and their
-`mmdb_type_union` member is called `_uint64`.
+`mmdb_type_union` member is called `u_uint64`.
 
 As portable C99 code cannot guarantee that such a long type is available, the data is
 represented in an array with 8 `uint8_t` elements that can be reached through the `data`
@@ -113,11 +121,11 @@ member of the resulting structure.  This may change in the future.
 #### 128-bit unsigned integer (uint128s)
 `mmdb_uint128_t`  
 `MMDB_UINT128`  
-`_uint128`  
+`u_uint128`  
 
 Uint128s represent 128-bit unsigned integers ranging from 0 to 2^128-1.
 Their type is `mmdb_uint128_t`, their `mmdb_type_enum` value is `MMDB_UINT128` and their
-`mmdb_type_union` member is called `_uint128`.
+`mmdb_type_union` member is called `u_uint128`.
 
 As portable C99 code cannot guarantee that such a long type is available, the data is
 represented in an array with 16 `uint8_t` elements that can be reached through the `data`
@@ -126,11 +134,11 @@ member of the resulting structure. This may change in the future.
 #### UTF-8 character strings (strings)
 `mmdb_string_t`  
 `MMDB_STRING`  
-`_string`  
+`u_string`  
 
 Strings represent a series of UTF-8 characters as the individual bytes of the representation.
 Their type is `mmdb_string_t`, their `mmdb_type_enum` value is `MMDB_STRING` and their
-`mmdb_type_union` member is called `_string`.
+`mmdb_type_union` member is called `u_string`.
 
 Their length in bytes (excluding the final '\0') is represented by the `length` member of
 the structure and the '\0' terminated array with the specific string can be found on the
@@ -144,11 +152,11 @@ is recommended unless you are certain the data doesn't contain NULL characters.
 #### Binary strings (bytes)
 `mmdb_bytes_t`  
 `MMDB_BYTES`  
-`_bytes`  
+`u_bytes`  
 
 Bytes represent arbitrary binary data.
 Their type is `mmdb_bytes_t`, their `mmdb_type_enum` value is `MMDB_BYTES` and their
-`mmdb_type_union` member is called `_bytes`.
+`mmdb_type_union` member is called `u_bytes`.
 
 Their length in bytes is represented by the `length` member of the structure and the
 specific data is contained as an array of `uint8_t` elements by the `data` member.
@@ -156,11 +164,11 @@ specific data is contained as an array of `uint8_t` elements by the `data` membe
 #### Object arrays (arrays)
 `mmdb_array_t`  
 `MMDB_ARRAY`  
-`_array`  
+`u_array`  
 
 Arrays represent a zero-indexed ordered collection of objects.
 Their type is `mmdb_array_t`, their `mmdb_type_enum` value is `MMDB_ARRAY` and their
-`mmdb_type_union` member is called `_array`.
+`mmdb_type_union` member is called `u_array`.
 
 The number of objects they contain is specified by the `length` member of the structure
 and the specific objects are contained as an array of `mmbd_type_t` elements by the
@@ -171,11 +179,11 @@ This data structure may change in the future.
 #### Object maps (maps)
 `mmdb_map_t`  
 `MMDB_MAP`  
-`_map`  
+`u_map`  
 
 Maps represent a maping of strings to objects.
 Their type is `mmdb_map_t`, their `mmdb_type_enum` value is `MMDB_MAP` and their
-`mmdb_type_union` member is called `_map`.
+`mmdb_type_union` member is called `u_map`.
 
 The number of entires they contain is specified by the `length` member of the structure,
 the keys are contained as an array of `mmdb_string_t` elements by the `keys` member and
@@ -301,6 +309,14 @@ will become invalid once this happens.
 
 You should call it when you are done using the database or to refresh the database after an update.
 
+### Testing for thread safety
+`void mmdb_threadsafe(void)`
+
+The function `mmdb_threadsafe` will return 1 when the backend uses thread-safe accesses to the
+database and 0 when it does not.
+
+You should use this in order to detect if mmdb_t objects can be shared accross threads or not.
+
 ### Database updates
 MMDB will likely fail in unpredictable ways if a database file is updated while the database is open.
 This is caused by MMDB caching the location of the metadata and data sections and some of the metadata
@@ -347,9 +363,15 @@ counting instead of reading new copies from the database each time. This is, for
 outside of the scope of the project though due to the complexity it would entail.
 
 ### Thread race conditions
-The library uses internally fseek and fread in order to keep portability high. This means that
+When compiled on systems other than POSIX compliant or Windows, the library uses non-thread
+safe calls to fseek and fread in order to keep portability high. This means that
 you must ensure that any calls to any APIs taking an mmdb_t structure as input must be
 serialized using a mutex.
 
-If you want to use the APIs in parallel consider using mmdb_open once per thread. This will 
-cost you an additional open file descriptor per thread but address the concurrency problem.
+You will get a compilation warning when the chosen backend is not thread safe and can use
+`mmdb_threadsafe` to check if the used backend is thread safe or not at runtime.
+
+If you want to use the APIs in parallel with a non thread-safe backend consider using mmdb_open
+once per thread. This will  cost you an additional open file descriptor per thread but address
+the concurrency problem. Alternatively use a mutex to serialize all accesses to the mmdb_t
+object accross threads.
