@@ -64,6 +64,75 @@ inline static poff64_t _mm_getfsz(pfilehdl_t fd) {
   return _filelengthi64(fd);
 }
 
+#elif defined(MMDB_USE_MMAP) && defined(__unix)
+
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <stdlib.h>
+#include <string.h>
+
+
+typedef off_t poff64_t;
+struct mmaphdl {
+  poff64_t dbsz;
+  char *db;
+};
+typedef struct mmaphdl * pfilehdl_t;
+
+inline static pfilehdl_t _mm_open(const char *path) {
+  struct mmaphdl * rv = malloc(sizeof(struct mmaphdl));
+  if (rv == NULL)
+    goto close0;
+  int fd = open(path,O_RDONLY);
+  if (fd < 0)
+    goto close1;
+  struct stat stb;
+  if (fstat(fd, &stb) < 0)
+    goto close2;
+  rv->dbsz = stb.st_size;
+  rv->db=mmap(NULL,rv->dbsz,PROT_READ,MAP_SHARED,fd,0);
+  if(rv->db == MAP_FAILED)
+    goto close2;
+  close(fd);
+  return rv;
+close2:
+  close(fd);
+close1:
+  free(rv);
+close0:
+  return NULL;
+}
+
+inline static int _mm_open_err(pfilehdl_t fd) {
+  return (fd == NULL);
+}
+
+inline static int _mm_close(pfilehdl_t fd) {
+  int rv = munmap(fd->db,fd->dbsz);
+  free(fd);
+  return rv;
+}
+
+inline static size_t _mm_pread(pfilehdl_t fd, void *ret, const size_t sz, poff64_t *offset) {
+  poff64_t rv = sz;
+  if (*offset >= fd->dbsz)
+    return 0;
+  if (*offset < 0)
+    *offset = 0;
+  if (fd->dbsz - *offset < rv)
+    rv = fd->dbsz - *offset;
+  memcpy(ret,fd->db+(*offset),rv);
+  *offset += rv;
+  return rv;
+}
+
+inline static poff64_t _mm_getfsz(pfilehdl_t fd) {
+  return fd->dbsz;
+}
+
 #elif defined(__unix)
 
 #include <sys/types.h>

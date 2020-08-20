@@ -237,6 +237,7 @@ static inline int _mmdb_get_type_length(const mmdb_t * const db, enum mmdb_type_
   if ((length) > (elength))\
     return 1;\
   uint8_t vdata[(elength)];\
+  memset(vdata,0,elength);\
   if ((length) != 0 && !fread_full(fp, vdata+((elength) - (length)), sizeof(uint8_t)*(length), (off)))\
     return 1;\
   for (int i = 0; i < (elength) - (length); i++)\
